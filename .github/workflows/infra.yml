@@ -1,0 +1,118 @@
+# =============================================================================
+# GitHub Actions: Infrastructure Pipeline (Terraform)
+# =============================================================================
+#
+# PURPOSE:
+#   Provision or destroy AWS infrastructure (VPC, EKS, ECR) using Terraform.
+#   Triggered manually via workflow_dispatch with ACTION parameter.
+#
+# REQUIRED GITHUB SECRETS:
+#   AWS_ACCESS_KEY_ID     — IAM user access key
+#   AWS_SECRET_ACCESS_KEY — IAM user secret key
+#
+# USAGE:
+#   GitHub → Actions → "Infrastructure (Terraform)" → Run workflow
+#   Select action: apply (create) or destroy (tear down)
+# =============================================================================
+
+name: "Infrastructure (Terraform)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action to perform"
+        required: true
+        type: choice
+        options:
+          - apply
+          - destroy
+      aws_region:
+        description: "AWS region"
+        required: false
+        default: "us-east-1"
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  AWS_REGION: ${{ inputs.aws_region || 'us-east-1' }}
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    name: "Terraform ${{ inputs.action }}"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      # ─────────────────────────────────────────────────────────────
+      # Step 1: Checkout
+      # ─────────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 2: Configure AWS Credentials
+      # ─────────────────────────────────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 3: Setup Terraform
+      # ─────────────────────────────────────────────────────────────
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.5"
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 4: Terraform Init
+      # ─────────────────────────────────────────────────────────────
+      - name: Terraform Init
+        run: terraform init -no-color
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 5: Terraform Validate
+      # ─────────────────────────────────────────────────────────────
+      - name: Terraform Validate
+        run: terraform validate -no-color
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 6: Terraform Plan
+      # ─────────────────────────────────────────────────────────────
+      - name: Terraform Plan
+        run: |
+          if [ "${{ inputs.action }}" == "destroy" ]; then
+            echo "📋 Planning DESTROY..."
+            terraform plan -destroy -out=tfplan -no-color
+          else
+            echo "📋 Planning APPLY..."
+            terraform plan -out=tfplan -no-color
+          fi
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 7: Terraform Execute
+      # ─────────────────────────────────────────────────────────────
+      - name: "Terraform ${{ inputs.action }}"
+        run: |
+          echo "🚀 Executing terraform ${{ inputs.action }}..."
+          terraform apply -auto-approve -no-color tfplan
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 8: Show Outputs (apply only)
+      # ─────────────────────────────────────────────────────────────
+      - name: Show Terraform Outputs
+        if: inputs.action == 'apply'
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  TERRAFORM OUTPUTS"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          terraform output -no-color

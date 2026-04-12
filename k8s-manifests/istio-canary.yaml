@@ -1,0 +1,88 @@
+# =============================================================================
+# Istio Traffic Management for Canary Deployment
+# =============================================================================
+#
+# THREE RESOURCES:
+#   1. Gateway        → Accepts external traffic into the mesh
+#   2. DestinationRule → Maps subset names (stable/canary) to pod labels (v1/v2)
+#   3. VirtualService  → Routes 90% to stable, 10% to canary
+#
+# TRAFFIC FLOW:
+#   [External] → [Istio Ingress GW] → [VirtualService 90/10] → [v1 or v2 pods]
+#
+# PROGRESSIVE ROLLOUT: Change weights in Git → ArgoCD syncs → Istio updates
+#   Phase 1: 90/10 → Phase 2: 75/25 → Phase 3: 50/50 → Phase 4: 0/100
+# =============================================================================
+
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: ml-api-gateway
+  namespace: default
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "*"
+
+---
+
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: ml-api-destination
+  namespace: default
+spec:
+  host: ml-api-service
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        maxRequestsPerConnection: 100
+  subsets:
+    # Maps to pods with label "version: v1"
+    - name: stable
+      labels:
+        version: v1
+    # Maps to pods with label "version: v2"
+    - name: canary
+      labels:
+        version: v2
+
+---
+
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: ml-api-virtualservice
+  namespace: default
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - ml-api-gateway
+  http:
+    - route:
+        - destination:
+            host: ml-api-service
+            subset: stable
+            port:
+              number: 80
+          weight: 90
+        - destination:
+            host: ml-api-service
+            subset: canary
+            port:
+              number: 80
+          weight: 10
+      timeout: 10s
+      retries:
+        attempts: 2
+        perTryTimeout: 5s
+        retryOn: 5xx,reset,connect-failure

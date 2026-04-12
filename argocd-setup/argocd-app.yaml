@@ -1,0 +1,114 @@
+# =============================================================================
+# ArgoCD Application CRD — GitOps Configuration
+# =============================================================================
+#
+# FILE PURPOSE:
+#   This is the "master switch" for GitOps. When applied to a cluster running
+#   ArgoCD, it tells ArgoCD:
+#     1. WHERE to find the desired state (Git repository + path)
+#     2. WHERE to deploy it (which cluster + namespace)
+#     3. HOW to keep it in sync (automated sync, pruning, self-healing)
+#
+# GITOPS WORKFLOW:
+#   ┌────────────┐     ┌─────────────┐     ┌─────────────────────┐
+#   │  Developer  │────→│  Git Push    │────→│  ArgoCD Detects     │
+#   │  edits YAML │     │  to main     │     │  drift from Git     │
+#   └────────────┘     └─────────────┘     └──────────┬──────────┘
+#                                                      │
+#                                          ┌───────────▼──────────┐
+#                                          │  ArgoCD Syncs        │
+#                                          │  k8s-manifests/ to   │
+#                                          │  Kubernetes cluster  │
+#                                          └──────────────────────┘
+#
+# KEY PRINCIPLE:
+#   Git is the SINGLE SOURCE OF TRUTH. No one runs kubectl apply manually.
+#   All changes go through Git (Pull Requests → merge → ArgoCD syncs).
+#   This provides audit trails, rollback via git revert, and consistency.
+#
+# HOW TO APPLY THIS FILE:
+#   kubectl apply -f argocd-setup/argocd-app.yaml
+#
+#   Then watch in ArgoCD UI:
+#     kubectl port-forward svc/argocd-server -n argocd 8080:443
+#     Open: https://localhost:8080
+#     Login: admin / <password from: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d>
+#
+# =============================================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  # Application name as it appears in the ArgoCD UI
+  name: ml-api-canary
+  # MUST be in the argocd namespace (where ArgoCD server runs)
+  namespace: argocd
+  # Finalizer ensures ArgoCD cleans up resources when the Application is deleted
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # ─────────────────────────────────────────────────────────────────────────
+  # PROJECT
+  # ─────────────────────────────────────────────────────────────────────────
+  # ArgoCD projects are like RBAC groups. They control which repos and
+  # clusters an Application can access. "default" has no restrictions.
+  project: default
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # SOURCE — Where to find the desired state
+  # ─────────────────────────────────────────────────────────────────────────
+  source:
+    # Git repository URL containing your Kubernetes manifests
+    repoURL: https://github.com/AjinkyaP-09/mlops-canary-pipeline.git
+
+    # Which branch/tag/commit to track
+    # HEAD = always track the latest commit on the default branch
+    targetRevision: HEAD
+
+    # Path WITHIN the repo where Kubernetes manifests live
+    # ArgoCD will apply ALL .yaml files in this directory
+    # This is why istio-canary.yaml and k8s-deployments.yaml are both here
+    path: k8s-manifests
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # DESTINATION — Where to deploy the resources
+  # ─────────────────────────────────────────────────────────────────────────
+  destination:
+    # The cluster to deploy to.
+    # "https://kubernetes.default.svc" means "the same cluster ArgoCD runs in"
+    # For multi-cluster setups, you'd add external cluster URLs here.
+    server: https://kubernetes.default.svc
+
+    # Target namespace for the deployed resources
+    namespace: default
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # SYNC POLICY — How to keep cluster in sync with Git
+  # ─────────────────────────────────────────────────────────────────────────
+  syncPolicy:
+    automated:
+      # ─────────────────────────────────────────────────────────────────
+      # PRUNE: Auto-delete resources that no longer exist in Git
+      # ─────────────────────────────────────────────────────────────────
+      # Example: If you delete istio-canary.yaml from Git and push,
+      # ArgoCD will automatically delete the Gateway, DestinationRule,
+      # and VirtualService from the cluster.
+      # Without prune: Deleted resources become "orphaned" in the cluster.
+      prune: true
+
+      # ─────────────────────────────────────────────────────────────────
+      # SELF-HEAL: Auto-revert manual cluster changes
+      # ─────────────────────────────────────────────────────────────────
+      # Example: If someone runs "kubectl edit deploy ml-api-v1" and
+      # changes replicas from 2 to 5, ArgoCD will detect the drift
+      # and revert it back to 2 (matching what's in Git).
+      # This enforces GitOps discipline — ALL changes go through Git.
+      selfHeal: true
+
+    syncOptions:
+      # Create the target namespace if it doesn't exist
+      - CreateNamespace=true
+      # Validate manifests before applying (catches YAML errors early)
+      - Validate=true
+      # Apply resources out of order if needed (handles circular dependencies)
+      - ApplyOutOfSyncOnly=true

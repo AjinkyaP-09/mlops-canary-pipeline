@@ -1,0 +1,259 @@
+# =============================================================================
+# GitHub Actions: Application Deployment Pipeline
+# =============================================================================
+#
+# PURPOSE:
+#   Deploys the ML API to EKS — builds Docker images, pushes to ECR,
+#   installs Istio + ArgoCD, and triggers GitOps sync.
+#
+# PREREQUISITE:
+#   Infrastructure workflow must have run with action=apply first.
+#   EKS cluster and ECR repository must exist.
+#
+# REQUIRED GITHUB SECRETS:
+#   AWS_ACCESS_KEY_ID     — IAM user access key
+#   AWS_SECRET_ACCESS_KEY — IAM user secret key
+#
+# USAGE:
+#   GitHub → Actions → "Deploy Application" → Run workflow
+#   Toggle options: install_istio, install_argocd, build_images
+# =============================================================================
+
+name: "Deploy Application"
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_images:
+        description: "Build and push Docker images to ECR"
+        type: boolean
+        default: true
+      install_istio:
+        description: "Install Istio service mesh (skip if already installed)"
+        type: boolean
+        default: true
+      install_argocd:
+        description: "Install ArgoCD (skip if already installed)"
+        type: boolean
+        default: true
+      aws_region:
+        description: "AWS region"
+        required: false
+        default: "us-east-1"
+
+env:
+  AWS_REGION: ${{ inputs.aws_region || 'us-east-1' }}
+
+permissions:
+  contents: write  # Needed to push updated manifests
+
+jobs:
+  deploy:
+    name: "Deploy to EKS"
+    runs-on: ubuntu-latest
+
+    steps:
+      # ─────────────────────────────────────────────────────────────
+      # Step 1: Checkout
+      # ─────────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 2: Configure AWS Credentials
+      # ─────────────────────────────────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 3: Setup Terraform (to read outputs)
+      # ─────────────────────────────────────────────────────────────
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.5"
+          terraform_wrapper: false  # Prevents wrapper from modifying output
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 4: Get Terraform Outputs
+      # ─────────────────────────────────────────────────────────────
+      - name: Get Terraform Outputs
+        id: tf
+        working-directory: terraform
+        run: |
+          terraform init -no-color
+          echo "ecr_url=$(terraform output -raw ecr_repository_url)" >> $GITHUB_OUTPUT
+          echo "cluster_name=$(terraform output -raw cluster_name)" >> $GITHUB_OUTPUT
+          echo "region=$(terraform output -raw region)" >> $GITHUB_OUTPUT
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 5: Configure kubectl for EKS
+      # ─────────────────────────────────────────────────────────────
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig --region ${{ steps.tf.outputs.region }} --name ${{ steps.tf.outputs.cluster_name }}
+          echo "✅ kubectl configured"
+          kubectl get nodes
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 6: Build & Push Docker Images to ECR
+      # ─────────────────────────────────────────────────────────────
+      - name: Login to ECR
+        if: inputs.build_images
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push images
+        if: inputs.build_images
+        run: |
+          ECR_URL="${{ steps.tf.outputs.ecr_url }}"
+
+          echo "🔨 Building ml-api:v1 (Stable)..."
+          docker build -t "${ECR_URL}:v1" ./app/
+
+          echo "🔨 Building ml-api:v2 (Canary)..."
+          docker build -t "${ECR_URL}:v2" ./app/
+
+          echo "📤 Pushing images to ECR..."
+          docker push "${ECR_URL}:v1"
+          docker push "${ECR_URL}:v2"
+          echo "✅ Images pushed!"
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 7: Update K8s Manifests with ECR URL
+      # ─────────────────────────────────────────────────────────────
+      - name: Update manifests with ECR URL
+        run: |
+          ECR_URL="${{ steps.tf.outputs.ecr_url }}"
+          sed -i "s|REPLACE_ECR_REPO_URL|${ECR_URL}|g" k8s-manifests/k8s-deployments.yaml || true
+          echo "✅ Manifests updated with: ${ECR_URL}"
+          grep 'image:' k8s-manifests/k8s-deployments.yaml
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 8: Install Istio (latest stable)
+      # ─────────────────────────────────────────────────────────────
+      - name: Install istioctl
+        if: inputs.install_istio
+        run: |
+          echo "📥 Downloading latest stable Istio..."
+          curl -L https://istio.io/downloadIstio | sh -
+          ISTIO_DIR=$(ls -d istio-* | head -n 1)
+          sudo mv "${ISTIO_DIR}/bin/istioctl" /usr/local/bin/
+          ISTIO_VERSION=$(istioctl version --remote=false 2>/dev/null | head -1)
+          echo "✅ istioctl installed: ${ISTIO_VERSION}"
+          echo "ISTIO_VERSION=${ISTIO_VERSION}" >> $GITHUB_ENV
+
+      - name: Install Istio on EKS
+        if: inputs.install_istio
+        run: |
+          istioctl install --set profile=default -y
+          kubectl label namespace default istio-injection=enabled --overwrite
+          echo "✅ Istio installed on EKS!"
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 9: Install Observability Stack
+      # ─────────────────────────────────────────────────────────────
+      - name: Install observability addons
+        if: inputs.install_istio
+        run: |
+          # Derive the release branch from the installed Istio version
+          MAJOR_MINOR=$(echo "${ISTIO_VERSION}" | grep -oP '^\d+\.\d+')
+          RELEASE="release-${MAJOR_MINOR}"
+          echo "📊 Installing addons from Istio ${RELEASE}..."
+
+          for ADDON in prometheus grafana kiali jaeger; do
+            echo "  → Installing ${ADDON}..."
+            kubectl apply -f "https://raw.githubusercontent.com/istio/istio/${RELEASE}/samples/addons/${ADDON}.yaml" 2>/dev/null || \
+            echo "  ⚠ ${ADDON} install from ${RELEASE} failed, trying master..." && \
+            kubectl apply -f "https://raw.githubusercontent.com/istio/istio/master/samples/addons/${ADDON}.yaml" 2>/dev/null || true
+          done
+
+          echo "⏳ Waiting for addons to be ready..."
+          kubectl rollout status deployment/prometheus -n istio-system --timeout=120s 2>/dev/null || true
+          kubectl rollout status deployment/grafana -n istio-system --timeout=120s 2>/dev/null || true
+          echo "✅ Observability stack installed!"
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 10: Install ArgoCD
+      # ─────────────────────────────────────────────────────────────
+      - name: Install ArgoCD
+        if: inputs.install_argocd
+        run: |
+          kubectl create namespace argocd 2>/dev/null || true
+          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+          echo "⏳ Waiting for ArgoCD server (this may take 2-3 minutes)..."
+          kubectl rollout status deployment/argocd-server -n argocd --timeout=300s
+          kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
+          echo "✅ ArgoCD installed and exposed via LoadBalancer!"
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 11: Push Updated Manifests to Git
+      # ─────────────────────────────────────────────────────────────
+      - name: Commit and push manifest updates
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add k8s-manifests/k8s-deployments.yaml
+          git diff --cached --quiet || git commit -m "ci: update image URLs to ECR [skip ci]"
+          git push
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 12: Deploy ArgoCD Application
+      # ─────────────────────────────────────────────────────────────
+      - name: Deploy ArgoCD Application
+        run: |
+          kubectl apply -f argocd-setup/argocd-app.yaml
+          echo "⏳ Waiting for ArgoCD to sync (30s)..."
+          sleep 30
+          kubectl get applications -n argocd
+          echo ""
+          echo "📋 Application pods (may take 1-2 min to be fully ready):"
+          kubectl get pods -l app=ml-api -o wide 2>/dev/null || echo "Pods starting..."
+          echo "✅ ArgoCD Application deployed!"
+
+      # ─────────────────────────────────────────────────────────────
+      # Step 13: Print Access Information
+      # ─────────────────────────────────────────────────────────────
+      - name: Print access information
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  ✅ DEPLOYMENT COMPLETE — ACCESS INFORMATION"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+
+          # Wait a moment for LoadBalancers to provision
+          sleep 10
+
+          ARGO_LB=$(kubectl get svc argocd-server -n argocd -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending...")
+          ISTIO_LB=$(kubectl get svc istio-ingressgateway -n istio-system -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending...")
+          ARGO_PW=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" 2>/dev/null | base64 -d || echo "N/A")
+
+          echo "  ┌─────────────────────────────────────────────────┐"
+          echo "  │  ML API (via Istio Ingress Gateway)             │"
+          echo "  │  http://${ISTIO_LB}/                            │"
+          echo "  │                                                  │"
+          echo "  │  Test prediction:                                │"
+          echo "  │  curl -X POST -H 'Content-Type: application/json' \\"
+          echo "  │    -d '{\"features\":[1.5,2.3]}' http://${ISTIO_LB}/predict"
+          echo "  │                                                  │"
+          echo "  │  ArgoCD UI:                                      │"
+          echo "  │  https://${ARGO_LB}                              │"
+          echo "  │  Username: admin                                 │"
+          echo "  │  Password: ${ARGO_PW}                            │"
+          echo "  │                                                  │"
+          echo "  │  Dashboards (run from WSL2 terminal):            │"
+          echo "  │  kubectl port-forward svc/kiali -n istio-system 20001:20001"
+          echo "  │  kubectl port-forward svc/grafana -n istio-system 3000:3000"
+          echo "  │                                                  │"
+          echo "  │  ⚠️  Run 'terraform destroy' when done!          │"
+          echo "  └─────────────────────────────────────────────────┘"
+          echo ""
+          echo "  NOTE: LoadBalancer URLs may take 2-3 minutes to become active."
+          echo "  If URLs show 'pending...', wait and then run:"
+          echo "    kubectl get svc -n istio-system istio-ingressgateway"
+          echo "    kubectl get svc -n argocd argocd-server"
+          echo ""

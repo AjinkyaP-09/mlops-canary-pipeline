@@ -1,0 +1,159 @@
+# =============================================================================
+# Kubernetes Deployments & Service for ML API Canary Deployment (EKS)
+# =============================================================================
+#
+# DEPLOYED VIA: ArgoCD (watches this file in GitHub)
+#
+# LABEL STRATEGY (CRITICAL FOR ISTIO):
+#   ┌─────────────────────────────────────────────────────────────────┐
+#   │  Label          │  Purpose                                      │
+#   │─────────────────│─────────────────────────────────────────────── │
+#   │  app: ml-api    │  Groups ALL versions under one Service        │
+#   │  version: v1/v2 │  Lets Istio DestinationRule target subsets    │
+#   └─────────────────────────────────────────────────────────────────┘
+#
+#   The Service selector uses ONLY "app: ml-api" (no version).
+#   Istio's VirtualService applies the weighted routing (90/10).
+#
+# IMAGE NOTE:
+#   Images are stored in AWS ECR. The deploy.sh script replaces
+#   REPLACE_ECR_REPO_URL with the actual ECR repository URL from
+#   Terraform outputs before pushing to Git.
+#
+# =============================================================================
+
+# =============================================================================
+# DEPLOYMENT: ml-api-v1 (Stable / Production) — 90% traffic
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-api-v1
+  labels:
+    app: ml-api
+    version: v1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ml-api
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: ml-api
+        version: v1
+    spec:
+      containers:
+        - name: ml-api
+          # ECR image URI — replaced by deploy.sh with actual ECR URL
+          image: REPLACE_ECR_REPO_URL:v1
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          env:
+            - name: MODEL_VERSION
+              value: "v1"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+          # Readiness: Is this pod ready to receive traffic?
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          # Liveness: Is this pod still alive?
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+
+---
+
+# =============================================================================
+# DEPLOYMENT: ml-api-v2 (Canary / Challenger) — 10% traffic
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-api-v2
+  labels:
+    app: ml-api
+    version: v2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ml-api
+      version: v2
+  template:
+    metadata:
+      labels:
+        app: ml-api
+        version: v2
+    spec:
+      containers:
+        - name: ml-api
+          image: REPLACE_ECR_REPO_URL:v2
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          env:
+            - name: MODEL_VERSION
+              value: "v2"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+
+---
+
+# =============================================================================
+# SERVICE: ml-api-service
+# =============================================================================
+# Selector uses ONLY "app: ml-api" (no version) so it routes to BOTH versions.
+# Istio's VirtualService handles the actual 90/10 traffic split.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-api-service
+  labels:
+    app: ml-api
+spec:
+  type: ClusterIP
+  selector:
+    app: ml-api
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 8000

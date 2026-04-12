@@ -1,0 +1,14 @@
+# =============================================================================
+# Python Dependencies for ML Prediction API
+# =============================================================================
+# Pin exact versions for reproducible builds across environments.
+# This prevents "works on my machine" issues in CI/CD pipelines.
+#
+# FastAPI: Modern, fast web framework for building APIs with Python 3.7+
+# Uvicorn: Lightning-fast ASGI server (runs FastAPI applications)
+# Pydantic: Data validation using Python type annotations (used by FastAPI)
+# =============================================================================
+
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+pydantic==2.9.0
