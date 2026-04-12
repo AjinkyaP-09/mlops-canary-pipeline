@@ -39,10 +39,10 @@ on:
       aws_region:
         description: "AWS region"
         required: false
-        default: "us-east-1"
+        default: "ap-south-1"
 
 env:
-  AWS_REGION: ${{ inputs.aws_region || 'us-east-1' }}
+  AWS_REGION: ${{ inputs.aws_region || 'ap-south-1' }}
 
 permissions:
   contents: write  # Needed to push updated manifests

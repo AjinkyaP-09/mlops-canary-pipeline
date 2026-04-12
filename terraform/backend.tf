@@ -38,7 +38,7 @@ terraform {
     key = "mlops-canary-pipeline/terraform.tfstate"
 
     # Region where the S3 bucket lives
-    region = "us-east-1"
+    region = "ap-south-1"
 
     # Encrypt state file at rest using SSE-S3
     encrypt = true
