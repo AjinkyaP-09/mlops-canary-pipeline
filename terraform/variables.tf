@@ -49,9 +49,9 @@ variable "cluster_version" {
 # ─────────────────────────────────────────────────────────────────────────────
 
 variable "node_instance_type" {
-  description = "EC2 instance type for EKS worker nodes (t3.medium = 2 vCPU, 4GB RAM)"
+  description = "EC2 instance type for EKS worker nodes (c7i-flex.large = 2 vCPU, 4GB RAM, free-tier eligible)"
   type        = string
-  default     = "t3.medium"
+  default     = "c7i-flex.large"
 }
 
 variable "node_desired_count" {
