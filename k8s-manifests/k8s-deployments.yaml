@@ -17,7 +17,7 @@
 #
 # IMAGE NOTE:
 #   Images are stored in AWS ECR. The deploy.sh script replaces
-#   REPLACE_ECR_REPO_URL with the actual ECR repository URL from
+#   260029269425.dkr.ecr.ap-south-1.amazonaws.com/ml-api with the actual ECR repository URL from
 #   Terraform outputs before pushing to Git.
 #
 # =============================================================================
@@ -47,7 +47,7 @@ spec:
       containers:
         - name: ml-api
           # ECR image URI — replaced by deploy.sh with actual ECR URL
-          image: REPLACE_ECR_REPO_URL:v1
+          image: 260029269425.dkr.ecr.ap-south-1.amazonaws.com/ml-api:v1
           imagePullPolicy: Always
           ports:
             - containerPort: 8000
@@ -105,7 +105,7 @@ spec:
     spec:
       containers:
         - name: ml-api
-          image: REPLACE_ECR_REPO_URL:v2
+          image: 260029269425.dkr.ecr.ap-south-1.amazonaws.com/ml-api:v2
           imagePullPolicy: Always
           ports:
             - containerPort: 8000
