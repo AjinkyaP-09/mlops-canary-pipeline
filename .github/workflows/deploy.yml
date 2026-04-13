@@ -142,7 +142,7 @@ jobs:
           curl -L https://istio.io/downloadIstio | sh -
           ISTIO_DIR=$(ls -d istio-* | head -n 1)
           sudo mv "${ISTIO_DIR}/bin/istioctl" /usr/local/bin/
-          ISTIO_VERSION=$(istioctl version --remote=false 2>/dev/null | head -1)
+          ISTIO_VERSION=$(istioctl version --remote=false 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1)
           echo "✅ istioctl installed: ${ISTIO_VERSION}"
           echo "ISTIO_VERSION=${ISTIO_VERSION}" >> $GITHUB_ENV
 
@@ -160,15 +160,16 @@ jobs:
         if: inputs.install_istio
         run: |
           # Derive the release branch from the installed Istio version
-          MAJOR_MINOR=$(echo "${ISTIO_VERSION}" | grep -oP '^\d+\.\d+')
+          MAJOR_MINOR=$(echo "${ISTIO_VERSION}" | grep -oP '\d+\.\d+' | head -1 || echo "1.29")
           RELEASE="release-${MAJOR_MINOR}"
           echo "📊 Installing addons from Istio ${RELEASE}..."
 
           for ADDON in prometheus grafana kiali jaeger; do
             echo "  → Installing ${ADDON}..."
-            kubectl apply -f "https://raw.githubusercontent.com/istio/istio/${RELEASE}/samples/addons/${ADDON}.yaml" 2>/dev/null || \
-            echo "  ⚠ ${ADDON} install from ${RELEASE} failed, trying master..." && \
-            kubectl apply -f "https://raw.githubusercontent.com/istio/istio/master/samples/addons/${ADDON}.yaml" 2>/dev/null || true
+            if ! kubectl apply -f "https://raw.githubusercontent.com/istio/istio/${RELEASE}/samples/addons/${ADDON}.yaml" 2>/dev/null; then
+              echo "  ⚠ ${ADDON} from ${RELEASE} failed, trying master..."
+              kubectl apply -f "https://raw.githubusercontent.com/istio/istio/master/samples/addons/${ADDON}.yaml" 2>/dev/null || echo "  ⚠ ${ADDON} skipped"
+            fi
           done
 
           echo "⏳ Waiting for addons to be ready..."
