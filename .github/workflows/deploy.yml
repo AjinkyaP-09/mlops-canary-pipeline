@@ -184,7 +184,7 @@ jobs:
         if: inputs.install_argocd
         run: |
           kubectl create namespace argocd 2>/dev/null || true
-          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+          kubectl apply --server-side=true -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
           echo "⏳ Waiting for ArgoCD server (this may take 2-3 minutes)..."
           kubectl rollout status deployment/argocd-server -n argocd --timeout=300s
           kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
